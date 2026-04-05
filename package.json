@@ -27,6 +27,11 @@
     "publishing"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/votelai/votel-mcp.git"
+  },
+  "homepage": "https://github.com/votelai/votel-mcp#readme",
   "engines": {
     "node": ">=18"
   },
