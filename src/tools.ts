@@ -25,7 +25,7 @@ export function registerTools(server: McpServer, api: ApiClient): void {
     "List all websites for your account. Returns name, CDN hostname, status, and domain count for each site. Example: 'List my websites' or 'Show active websites'.",
     {
       search: z.string().optional().describe("Search by website name"),
-      status: z.string().optional().describe("Filter by status: active, provisioning, error, suspended"),
+      status: z.enum(["active", "provisioning", "error", "suspended"]).optional().describe("Filter by website status"),
     },
     async ({ search, status }) => {
       const params = new URLSearchParams();
@@ -44,7 +44,7 @@ export function registerTools(server: McpServer, api: ApiClient): void {
     "Create a new website with CDN hosting. Provisions storage and pull zone automatically. Example: 'Create a website called My Business'.",
     {
       name: z.string().describe("Display name for the website"),
-      storage_region: z.string().optional().default("NY").describe("Storage region: NY, LA, UK, DE, SG, SYD, BR, JH, SE. Default: NY"),
+      storage_region: z.enum(["NY", "LA", "UK", "DE", "SG", "SYD", "BR", "JH", "SE"]).optional().default("NY").describe("Storage region. NY=New York, LA=Los Angeles, UK=London, DE=Frankfurt, SG=Singapore, SYD=Sydney, BR=São Paulo, JH=Johannesburg, SE=Stockholm"),
     },
     async ({ name, storage_region }) => {
       const data = await api.post<{ id: string; name: string; cdn_hostname: string | null; status: string }>("/api/websites", { name, storage_region });
@@ -164,7 +164,7 @@ export function registerTools(server: McpServer, api: ApiClient): void {
     "List contacts in your CRM with optional search and filtering. Returns name, email, phone, and lifecycle stage. Example: 'Show my contacts' or 'Find contacts named John'.",
     {
       search: z.string().optional().describe("Search by name, email, or phone"),
-      lifecycle_stage: z.string().optional().describe("Filter by stage: lead, customer, subscriber, opportunity"),
+      lifecycle_stage: z.enum(["subscriber", "lead", "mql", "sql", "opportunity", "customer", "evangelist", "other"]).optional().describe("Filter by lifecycle stage"),
       limit: z.number().optional().default(25).describe("Max results (default 25, max 100)"),
       page: z.number().optional().default(1).describe("Page number"),
     },
@@ -219,7 +219,7 @@ export function registerTools(server: McpServer, api: ApiClient): void {
       email: z.string().optional().describe("Email address"),
       phone: z.string().optional().describe("Phone number"),
       company: z.string().optional().describe("Company name"),
-      lifecycle_stage: z.string().optional().describe("Lifecycle stage (lead, customer, subscriber)"),
+      lifecycle_stage: z.enum(["subscriber", "lead", "mql", "sql", "opportunity", "customer", "evangelist"]).optional().describe("Sales journey stage. Default: lead"),
       tags: z.array(z.string()).optional().describe("Tags to apply to this contact"),
     },
     async ({ first_name, last_name, email, phone, company, lifecycle_stage, tags }) => {
@@ -247,7 +247,7 @@ export function registerTools(server: McpServer, api: ApiClient): void {
       email: z.string().optional().describe("Email address"),
       phone: z.string().optional().describe("Phone number"),
       company: z.string().optional().describe("Company name"),
-      lifecycle_stage: z.string().optional().describe("Lifecycle stage"),
+      lifecycle_stage: z.enum(["subscriber", "lead", "mql", "sql", "opportunity", "customer", "evangelist"]).optional().describe("New lifecycle stage"),
       tags: z.array(z.string()).optional().describe("Replace tags with this list"),
     },
     async ({ contact_id, ...fields }) => {
@@ -336,8 +336,9 @@ export function registerTools(server: McpServer, api: ApiClient): void {
     "list_tasks",
     "List tasks with optional filtering by status or priority. Example: 'Show my tasks' or 'What tasks are due today?' or 'Show high priority tasks'.",
     {
-      status: z.string().optional().describe("Filter: todo, in_progress, completed"),
-      priority: z.string().optional().describe("Filter: low, medium, high, urgent"),
+      status: z.enum(["todo", "in_progress", "completed"]).optional().describe("Filter by task status"),
+      priority: z.enum(["low", "medium", "high", "urgent"]).optional().describe("Filter by priority level"),
+      due_date: z.string().optional().describe("Filter by due date (YYYY-MM-DD). Example: '2026-04-06'"),
       limit: z.number().optional().default(25).describe("Max results (default 25)"),
     },
     async ({ status, priority, limit }) => {
@@ -367,8 +368,8 @@ export function registerTools(server: McpServer, api: ApiClient): void {
       title: z.string().describe("Task title"),
       description: z.string().optional().describe("Task description"),
       due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
-      priority: z.string().optional().default("medium").describe("Priority: low, medium, high, urgent"),
-      status: z.string().optional().default("todo").describe("Status: todo, in_progress, completed"),
+      priority: z.enum(["low", "medium", "high", "urgent"]).optional().default("medium").describe("Task priority"),
+      status: z.enum(["todo", "in_progress", "completed"]).optional().default("todo").describe("Initial status"),
       lead_id: z.string().optional().describe("Contact ID to link this task to"),
     },
     async ({ title, description, due_date, priority, status, lead_id }) => {
@@ -391,8 +392,8 @@ export function registerTools(server: McpServer, api: ApiClient): void {
       title: z.string().optional().describe("Task title"),
       description: z.string().optional().describe("Task description"),
       due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
-      priority: z.string().optional().describe("Priority: low, medium, high, urgent"),
-      status: z.string().optional().describe("Status: todo, in_progress, completed"),
+      priority: z.enum(["low", "medium", "high", "urgent"]).optional().describe("New priority level"),
+      status: z.enum(["todo", "in_progress", "completed"]).optional().describe("New status"),
     },
     async ({ task_id, ...fields }) => {
       const updates: Record<string, unknown> = {};
@@ -424,7 +425,7 @@ export function registerTools(server: McpServer, api: ApiClient): void {
     {
       contact_id: z.string().describe("The contact ID (UUID)"),
       limit: z.number().optional().default(20).describe("Max results (default 20)"),
-      activity_type: z.string().optional().describe("Filter by type: call, email, sms, note, system"),
+      activity_type: z.enum(["call", "email", "sms", "note", "system"]).optional().describe("Filter by activity type. Omit to show all."),
     },
     async ({ contact_id, limit, activity_type }) => {
       const params = new URLSearchParams();
@@ -487,7 +488,7 @@ export function registerTools(server: McpServer, api: ApiClient): void {
     "Create a new custom field for contacts. Supports text, email, phone, dropdown, date, number, and textarea types. Example: 'Create a dropdown field called Industry with options: Tech, Healthcare, Finance'.",
     {
       label: z.string().describe("Display name for the field"),
-      field_type: z.string().describe("Field type: text, email, phone, dropdown, date, number, textarea"),
+      field_type: z.enum(["text", "email", "phone", "dropdown", "date", "number", "textarea"]).describe("Data type for the field"),
       options: z.array(z.string()).optional().describe("Dropdown options (only for dropdown type)"),
     },
     async ({ label, field_type, options }) => {
