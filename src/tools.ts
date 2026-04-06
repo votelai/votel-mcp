@@ -156,6 +156,72 @@ export function registerTools(server: McpServer, api: ApiClient): void {
   );
 
   // ═══════════════════════════════════════════════════════════════════
+  // FILE MANAGEMENT
+  // ═══════════════════════════════════════════════════════════════════
+
+  server.tool(
+    "list_files",
+    "List files and folders in a website's storage. Use path '/' for root directory. Example: 'Show files in my website'.",
+    {
+      site_id: z.string().describe("The website ID (UUID). Get from list_websites."),
+      path: z.string().optional().default("/").describe("Directory path. Use '/' for root. Example: '/images'"),
+    },
+    async ({ site_id, path }) => {
+      const data = await api.get<Array<{ ObjectName: string; IsDirectory: boolean; Length: number }>>(`/api/websites/${site_id}/files?path=${encodeURIComponent(path ?? "/")}`);
+      if (!data || data.length === 0) return { content: [{ type: "text" as const, text: "No files found in this directory." }] };
+      const lines = data.map((f) => {
+        if (f.IsDirectory) return `  [folder] ${f.ObjectName}`;
+        const size = f.Length > 1024 ? `${(f.Length / 1024).toFixed(1)} KB` : `${f.Length} bytes`;
+        return `  ${f.ObjectName} (${size})`;
+      });
+      return { content: [{ type: "text" as const, text: `Files in ${path}:\n\n${lines.join("\n")}` }] };
+    }
+  );
+
+  server.tool(
+    "upload_file",
+    "Upload a file to a website's storage. Content must be base64-encoded. File is immediately available via CDN. Example: 'Upload index.html to my website'.",
+    {
+      site_id: z.string().describe("The website ID (UUID). Get from list_websites."),
+      file_name: z.string().describe("File name. Example: 'index.html', 'style.css'"),
+      content: z.string().describe("File content as base64-encoded string"),
+      path: z.string().optional().default("/").describe("Directory path. Use '/' for root. Example: '/css'"),
+    },
+    async ({ site_id, file_name, content, path }) => {
+      const data = await api.post<{ file_name: string; uploaded: boolean }>(`/api/websites/${site_id}/files`, { path: path ?? "/", file_name, content });
+      return { content: [{ type: "text" as const, text: `File '${file_name}' uploaded successfully.` }] };
+    }
+  );
+
+  server.tool(
+    "delete_file",
+    "Delete a file from a website's storage. Example: 'Delete old-page.html from my website'.",
+    {
+      site_id: z.string().describe("The website ID (UUID). Get from list_websites."),
+      file_name: z.string().describe("File name to delete. Example: 'old-page.html'"),
+      path: z.string().optional().default("/").describe("Directory path. Example: '/', '/images'"),
+    },
+    async ({ site_id, file_name, path }) => {
+      await api.del(`/api/websites/${site_id}/files/${encodeURIComponent(file_name)}?path=${encodeURIComponent(path ?? "/")}`);
+      return { content: [{ type: "text" as const, text: `File '${file_name}' deleted.` }] };
+    }
+  );
+
+  server.tool(
+    "create_folder",
+    "Create a new folder in a website's storage. Example: 'Create an images folder'.",
+    {
+      site_id: z.string().describe("The website ID (UUID). Get from list_websites."),
+      folder_name: z.string().describe("Folder name. Example: 'images', 'css', 'js'"),
+      path: z.string().optional().default("/").describe("Parent directory. Use '/' for root."),
+    },
+    async ({ site_id, folder_name, path }) => {
+      await api.post(`/api/websites/${site_id}/folders`, { path: path ?? "/", folder_name });
+      return { content: [{ type: "text" as const, text: `Folder '${folder_name}' created.` }] };
+    }
+  );
+
+  // ═══════════════════════════════════════════════════════════════════
   // CONTACTS
   // ═══════════════════════════════════════════════════════════════════
 
