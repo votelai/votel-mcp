@@ -221,6 +221,29 @@ export function registerTools(server: McpServer, api: ApiClient): void {
     }
   );
 
+  server.tool(
+    "publish_site",
+    "Deploy multiple files to a website in one call. Pass a map of file paths to content. CDN cache is purged automatically. This is the best way to publish or update a website. Example: 'Build a landing page and publish it'.",
+    {
+      site_id: z.string().describe("The website ID (UUID). Get from list_websites or create one first."),
+      files: z.record(z.string(), z.string()).describe("Map of file paths to content. Keys are paths (e.g. 'index.html', 'css/style.css'). Values are raw text content."),
+      purge_cache: z.boolean().optional().default(true).describe("Purge CDN cache after upload. Default: true"),
+    },
+    async ({ site_id, files, purge_cache }) => {
+      const data = await api.post<{ uploaded: string[]; errors: string[]; cdn_url: string }>(`/api/websites/${site_id}/publish`, { files, purge_cache: purge_cache ?? true });
+      const lines = [`Published ${(data.uploaded || []).length} file(s) to ${data.cdn_url || ""}`];
+      if (data.uploaded?.length) {
+        lines.push("\nFiles:");
+        for (const f of data.uploaded) lines.push(`  - ${data.cdn_url}/${f}`);
+      }
+      if (data.errors?.length) {
+        lines.push(`\nErrors (${data.errors.length}):`);
+        for (const e of data.errors) lines.push(`  - ${e}`);
+      }
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    }
+  );
+
   // ═══════════════════════════════════════════════════════════════════
   // CONTACTS
   // ═══════════════════════════════════════════════════════════════════
