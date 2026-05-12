@@ -67,4 +67,30 @@ export class ApiClient {
   async del<T>(path: string): Promise<T> {
     return this.request<T>("DELETE", path);
   }
+
+  async postForm<T>(path: string, formData: FormData): Promise<T> {
+    const url = `${this.baseUrl}${path}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "X-API-Key": this.apiKey },
+      body: formData,
+    });
+
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const err = await res.json();
+        detail = err.detail || err.message || detail;
+      } catch {
+        // ignore parse errors
+      }
+      throw new Error(`API error: ${detail}`);
+    }
+
+    if (res.status === 204) {
+      return {} as T;
+    }
+
+    return res.json() as Promise<T>;
+  }
 }

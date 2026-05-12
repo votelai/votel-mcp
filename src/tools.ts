@@ -421,86 +421,525 @@ export function registerTools(server: McpServer, api: ApiClient): void {
   // TASKS
   // ═══════════════════════════════════════════════════════════════════
 
+  // ---------- Shared helpers ----------
+
+  type TaskRow = Record<string, unknown>;
+
+  function renderTaskLine(t: TaskRow): string {
+    const parts = [`- ${t.title || "Untitled"}`];
+    parts.push(`status: ${t.is_completed === true ? "completed" : "todo"}`);
+    if (t.priority && t.priority !== "none") parts.push(`priority: ${t.priority}`);
+    if (t.task_type) parts.push(`type: ${t.task_type}`);
+    if (t.assigned_to_name) parts.push(`assignee: ${t.assigned_to_name}`);
+    if (t.due_date) parts.push(`due: ${t.due_date}`);
+    parts.push(`id: ${t.task_id}`);
+    return parts.join(" | ");
+  }
+
+  function renderTaskFull(t: TaskRow): string {
+    const lines: string[] = [];
+    lines.push(`Title: ${t.title || "Untitled"}`);
+    lines.push(`ID: ${t.task_id}`);
+    lines.push(`Status: ${t.is_completed === true ? "completed" : "open"}${t.status_id ? ` (status_id: ${t.status_id})` : ""}`);
+    if (t.priority) lines.push(`Priority: ${t.priority}`);
+    if (t.task_type) lines.push(`Type: ${t.task_type}`);
+    if (t.task_category) lines.push(`Category: ${t.task_category}`);
+    if (t.project_id) lines.push(`Project: ${t.project_name || t.project_id}`);
+    if (t.assigned_to_id) lines.push(`Assignee: ${t.assigned_to_name || t.assigned_to_id}`);
+    if (t.related_lead_id) lines.push(`Contact: ${t.related_lead_name || t.related_lead_id}`);
+    if (t.due_date) lines.push(`Due: ${t.due_date}${t.due_time ? ` ${t.due_time}` : ""}${t.due_date_timezone ? ` (${t.due_date_timezone})` : ""}`);
+    if (t.duration) lines.push(`Duration: ${t.duration}m`);
+    if (t.parent_task_id) lines.push(`Parent task: ${t.parent_task_id}`);
+    if (typeof t.subtask_count === "number" && t.subtask_count > 0) lines.push(`Subtasks: ${t.subtask_count}`);
+    if (t.is_snoozed) lines.push(`Snoozed until: ${t.snoozed_until}`);
+    const tags = Array.isArray(t.tags) ? t.tags : [];
+    if (tags.length > 0) lines.push(`Tags: ${tags.map((tag: unknown) => (typeof tag === "string" ? tag : (tag as Record<string, unknown>)?.name)).filter(Boolean).join(", ")}`);
+    if (t.description) lines.push(`\nDescription:\n${t.description}`);
+    const comments = Array.isArray(t.recent_comments) ? t.recent_comments as Array<Record<string, unknown>> : [];
+    const userComments = comments.filter((c) => c.type !== "activity");
+    if (userComments.length > 0) {
+      lines.push(`\nComments (${userComments.length}):`);
+      for (const c of userComments.slice(-10)) {
+        lines.push(`  - [${c.created_at}] ${c.user_name || "?"}: ${c.content}`);
+      }
+    }
+    const attachments = Array.isArray(t.attachments) ? t.attachments as Array<Record<string, unknown>> : [];
+    if (attachments.length > 0) {
+      lines.push(`\nAttachments (${attachments.length}):`);
+      for (const a of attachments) {
+        lines.push(`  - ${a.name || "(unnamed)"} → ${a.url || ""}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  async function fetchTask(taskId: string): Promise<TaskRow> {
+    const res = await api.get<{ success: boolean; data: TaskRow }>(`/api/tasks/${taskId}`);
+    return res.data || {};
+  }
+
+  // ---------- list_tasks ----------
+
   server.tool(
     "list_tasks",
-    "List tasks with optional filtering by status or priority. Example: 'Show my tasks' or 'What tasks are due today?' or 'Show high priority tasks'.",
+    "List tasks with optional filtering by completion, priority, type, assignee, or search term. Example: 'Show my tasks', 'Show high priority open tasks', 'Tasks assigned to Alice'.",
     {
-      status: z.enum(["todo", "in_progress", "completed"]).optional().describe("Filter by task status"),
-      priority: z.enum(["low", "medium", "high", "urgent"]).optional().describe("Filter by priority level"),
-      due_date: z.string().optional().describe("Filter by due date (YYYY-MM-DD). Example: '2026-04-06'"),
-      limit: z.number().optional().default(25).describe("Max results (default 25)"),
+      is_completed: z.boolean().optional().describe("Filter by completion status. true = completed, false = open. Omit for all."),
+      priority: z.enum(["low", "medium", "high", "urgent", "none"]).optional().describe("Filter by priority level"),
+      task_type: z.string().optional().describe("Filter by task type key (use list_task_types to discover)"),
+      assigned_to_id: z.string().optional().describe("Filter by assigned user UUID (use list_users to discover)"),
+      project_id: z.string().optional().describe("Filter by project UUID (use list_projects to discover)"),
+      search: z.string().optional().describe("Search keyword (matches title/description)"),
+      limit: z.number().optional().default(25).describe("Max results (default 25, capped at 100)"),
     },
-    async ({ status, priority, limit }) => {
+    async ({ is_completed, priority, task_type, assigned_to_id, project_id, search, limit }) => {
       const params = new URLSearchParams();
-      if (status) params.set("status", status);
+      if (is_completed !== undefined) params.set("is_completed", is_completed ? "true" : "false");
       if (priority) params.set("priority", priority);
+      if (task_type) params.set("task_type", task_type);
+      if (assigned_to_id) params.set("assignees[]", assigned_to_id);
+      if (project_id) params.set("project_id", project_id);
+      if (search) params.set("search_keyword", search);
       params.set("limit", String(Math.min(limit ?? 25, 100)));
-      const data = await api.get<{ data: Array<Record<string, unknown>>; total: number }>(`/api/tasks?${params.toString()}`);
-      const tasks = data.data || [];
+      type Group = { leads?: TaskRow[]; total_count?: number };
+      const response = await api.get<{ success: boolean; groups: Record<string, Group> }>(`/api/tasks?${params.toString()}`);
+      const groups = response.groups || {};
+      const tasks: TaskRow[] = [];
+      let total = 0;
+      for (const key of Object.keys(groups)) {
+        const g = groups[key];
+        if (Array.isArray(g.leads)) tasks.push(...g.leads);
+        total += g.total_count ?? 0;
+      }
       if (tasks.length === 0) return { content: [{ type: "text" as const, text: "No tasks found." }] };
-      const lines = tasks.map((t) => {
-        const parts = [`- ${t.title || "Untitled"}`];
-        if (t.status) parts.push(`status: ${t.status}`);
-        if (t.priority) parts.push(`priority: ${t.priority}`);
-        if (t.due_date) parts.push(`due: ${t.due_date}`);
-        parts.push(`id: ${t.id}`);
-        return parts.join(" | ");
-      });
-      return { content: [{ type: "text" as const, text: `Found ${data.total || tasks.length} task(s):\n\n${lines.join("\n")}` }] };
+      const lines = tasks.map(renderTaskLine);
+      return { content: [{ type: "text" as const, text: `Found ${total || tasks.length} task(s):\n\n${lines.join("\n")}` }] };
     }
   );
+
+  // ---------- create_task ----------
 
   server.tool(
     "create_task",
-    "Create a new task. Can optionally link to a contact. Example: 'Create a task to follow up with John tomorrow' or 'Add a high priority task: Review proposal'.",
+    "Create a new task. Supports the full task field set: assignee, priority, type, status, project, tags, due date with time/timezone, duration, subtask parent, and contact link. Use list_users / list_projects / list_task_statuses / list_task_types to discover valid IDs. Example: 'Create a high priority task to follow up with John tomorrow'.",
     {
-      title: z.string().describe("Task title"),
+      title: z.string().describe("Task title (required)"),
       description: z.string().optional().describe("Task description"),
+      priority: z.enum(["low", "medium", "high", "urgent", "none"]).optional().describe("Task priority"),
       due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
-      priority: z.enum(["low", "medium", "high", "urgent"]).optional().default("medium").describe("Task priority"),
-      status: z.enum(["todo", "in_progress", "completed"]).optional().default("todo").describe("Initial status"),
-      lead_id: z.string().optional().describe("Contact ID to link this task to"),
+      due_time: z.string().optional().describe("Due time, 12-hour format (e.g. '9:00 AM')"),
+      due_date_type: z.enum(["floating", "local"]).optional().describe("Date type: 'floating' (same wall-clock everywhere) or 'local' (timezone-anchored)"),
+      due_date_timezone: z.string().optional().describe("IANA timezone for 'local' dates (e.g. 'America/New_York')"),
+      duration: z.union([z.number(), z.string()]).optional().describe("Task duration in minutes (int) or string ('15m', '1h30m')"),
+      task_type: z.string().optional().describe("Task type key — use list_task_types to discover valid keys for the target project"),
+      task_category: z.enum(["prospecting", "qualification", "follow_up", "closing", "onboarding"]).optional().describe("Task category"),
+      status_id: z.string().optional().describe("Custom status UUID — use list_task_statuses to discover values for the target project"),
+      is_completed: z.boolean().optional().describe("Initial completion state (default false). When true, a follow-up PUT marks the task complete after creation."),
+      assigned_to_id: z.string().optional().describe("UUID of user to assign — use list_users to discover"),
+      related_lead_id: z.string().optional().describe("Contact UUID to link this task to"),
+      contact_id: z.string().optional().describe("Alias for related_lead_id"),
+      project_id: z.string().optional().describe("Project UUID — use list_projects to discover; defaults to the tenant's Default project"),
+      parent_task_id: z.string().optional().describe("UUID of a parent task to make this a subtask"),
+      tags: z.array(z.string()).optional().describe("Tag strings"),
     },
-    async ({ title, description, due_date, priority, status, lead_id }) => {
+    async (input) => {
+      const { title, is_completed, contact_id, related_lead_id, tags, ...rest } = input;
       const body: Record<string, unknown> = { title };
-      if (description) body.description = description;
-      if (due_date) body.due_date = due_date;
-      if (priority) body.priority = priority;
-      if (status) body.status = status;
-      if (lead_id) body.lead_id = lead_id;
-      const data = await api.post<{ id: string; title: string; status: string; priority: string }>("/api/tasks", body);
-      return { content: [{ type: "text" as const, text: `Task "${data.title}" created!\n  ID: ${data.id}\n  Status: ${data.status}\n  Priority: ${data.priority || "medium"}` }] };
+      const passthrough = ["description", "priority", "due_date", "due_time", "due_date_type", "due_date_timezone", "duration", "task_type", "task_category", "status_id", "assigned_to_id", "project_id", "parent_task_id"] as const;
+      for (const k of passthrough) {
+        const v = (rest as Record<string, unknown>)[k];
+        if (v !== undefined) body[k] = v;
+      }
+      const lead = related_lead_id ?? contact_id;
+      if (lead) body.related_lead_id = lead;
+      if (Array.isArray(tags) && tags.length > 0) body.tags = tags.map((t) => ({ name: t }));
+
+      const response = await api.post<{ success: boolean; data: TaskRow }>("/api/tasks", body);
+      const task = response.data || {};
+      const taskId = (task.task_id ?? "") as string;
+
+      if (is_completed === true && task.is_completed !== true && taskId) {
+        await api.patch(`/api/tasks/${taskId}/complete`, { is_completed: true });
+        task.is_completed = true;
+      }
+
+      return { content: [{ type: "text" as const, text: `Task created.\n\n${renderTaskFull(task)}` }] };
     }
   );
 
+  // ---------- update_task ----------
+
   server.tool(
     "update_task",
-    "Update a task — change status, priority, due date, etc. Example: 'Mark task <id> as completed' or 'Change priority to urgent'.",
+    "Update fields on an existing task. Use is_completed (boolean) to toggle completion — there is no flat 'status' enum on the backend; for custom statuses use status_id with values from list_task_statuses. Example: 'Set task <id> priority to urgent and assign to Alice'.",
     {
-      task_id: z.string().describe("The task ID (UUID)"),
-      title: z.string().optional().describe("Task title"),
-      description: z.string().optional().describe("Task description"),
-      due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
-      priority: z.enum(["low", "medium", "high", "urgent"]).optional().describe("New priority level"),
-      status: z.enum(["todo", "in_progress", "completed"]).optional().describe("New status"),
+      task_id: z.string().describe("Task UUID"),
+      title: z.string().optional(),
+      description: z.string().optional(),
+      priority: z.enum(["low", "medium", "high", "urgent", "none"]).optional(),
+      due_date: z.string().optional().describe("YYYY-MM-DD"),
+      due_time: z.string().optional().describe("12-hour format, e.g. '9:00 AM'"),
+      due_date_type: z.enum(["floating", "local"]).optional(),
+      due_date_timezone: z.string().optional(),
+      duration: z.union([z.number(), z.string()]).optional(),
+      task_type: z.string().optional().describe("Task type key from list_task_types"),
+      task_category: z.enum(["prospecting", "qualification", "follow_up", "closing", "onboarding"]).optional(),
+      status_id: z.string().optional().describe("Custom status UUID from list_task_statuses"),
+      is_completed: z.boolean().optional().describe("Toggle completion"),
+      assigned_to_id: z.string().optional().describe("UUID of user to assign"),
+      related_lead_id: z.string().optional(),
+      project_id: z.string().optional(),
+      tags: z.array(z.string()).optional(),
+      action_outcome: z.enum(["success", "no_answer", "left_voicemail", "bounced", "replied", "declined"]).optional(),
+      action_outcome_notes: z.string().optional(),
+      action_completed: z.boolean().optional(),
+      is_snoozed: z.boolean().optional(),
+      snoozed_until: z.string().optional().describe("ISO datetime"),
     },
-    async ({ task_id, ...fields }) => {
+    async ({ task_id, tags, ...fields }) => {
       const updates: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(fields)) {
         if (v !== undefined) updates[k] = v;
       }
-      await api.put(`/api/tasks/${task_id}`, updates);
-      return { content: [{ type: "text" as const, text: `Task ${task_id} updated.` }] };
+      if (Array.isArray(tags)) updates.tags = tags.map((t) => ({ name: t }));
+      if (Object.keys(updates).length === 0) {
+        return { content: [{ type: "text" as const, text: "No fields to update." }] };
+      }
+      const res = await api.put<{ success: boolean; data: TaskRow }>(`/api/tasks/${task_id}`, updates);
+      const task = res.data || {};
+      return { content: [{ type: "text" as const, text: `Task updated.\n\n${renderTaskFull(task)}` }] };
     }
   );
 
+  // ---------- delete_task ----------
+
   server.tool(
     "delete_task",
-    "Delete a task. Example: 'Delete task <id>'.",
+    "Soft-delete a task. Example: 'Delete task <id>'.",
     { task_id: z.string().describe("The task ID (UUID)") },
     async ({ task_id }) => {
       await api.del(`/api/tasks/${task_id}`);
       return { content: [{ type: "text" as const, text: `Task ${task_id} deleted.` }] };
+    }
+  );
+
+  // ---------- get_task ----------
+
+  server.tool(
+    "get_task",
+    "Get full detail for a single task — fields, comments, attachments, subtask count. Example: 'Show me task <id>'.",
+    { task_id: z.string().describe("The task ID (UUID)") },
+    async ({ task_id }) => {
+      const task = await fetchTask(task_id);
+      if (!task || !task.task_id) {
+        return { content: [{ type: "text" as const, text: `Task ${task_id} not found.` }] };
+      }
+      return { content: [{ type: "text" as const, text: renderTaskFull(task) }] };
+    }
+  );
+
+  // ---------- complete_task ----------
+
+  server.tool(
+    "complete_task",
+    "Mark a task as completed (or reopen with is_completed=false). Example: 'Mark task <id> as done'.",
+    {
+      task_id: z.string().describe("Task UUID"),
+      is_completed: z.boolean().optional().default(true).describe("true to complete (default), false to reopen"),
+    },
+    async ({ task_id, is_completed }) => {
+      const res = await api.patch<{ success: boolean; data: TaskRow }>(`/api/tasks/${task_id}/complete`, { is_completed: is_completed ?? true });
+      const task = res.data || {};
+      const state = task.is_completed === true ? "completed" : "open";
+      return { content: [{ type: "text" as const, text: `Task ${task_id} → ${state}.` }] };
+    }
+  );
+
+  // ---------- snooze_task ----------
+
+  server.tool(
+    "snooze_task",
+    "Snooze a task until a future datetime. Example: 'Snooze task <id> until tomorrow 9am'.",
+    {
+      task_id: z.string().describe("Task UUID"),
+      snoozed_until: z.string().describe("ISO datetime (e.g. '2026-05-20T09:00:00Z')"),
+    },
+    async ({ task_id, snoozed_until }) => {
+      const res = await api.patch<{ success: boolean; data: TaskRow }>(`/api/tasks/${task_id}/snooze`, { snoozed_until });
+      const task = res.data || {};
+      return { content: [{ type: "text" as const, text: `Task ${task_id} snoozed until ${task.snoozed_until || snoozed_until}.` }] };
+    }
+  );
+
+  // ---------- list_subtasks ----------
+
+  server.tool(
+    "list_subtasks",
+    "List all subtasks of a parent task. To create a subtask, call create_task with parent_task_id. Example: 'Show subtasks of task <id>'.",
+    { task_id: z.string().describe("Parent task UUID") },
+    async ({ task_id }) => {
+      const res = await api.get<{ success: boolean; data: TaskRow[] }>(`/api/tasks/${task_id}/subtasks`);
+      const subs = Array.isArray(res.data) ? res.data : [];
+      if (subs.length === 0) return { content: [{ type: "text" as const, text: "No subtasks." }] };
+      return { content: [{ type: "text" as const, text: `Found ${subs.length} subtask(s):\n\n${subs.map(renderTaskLine).join("\n")}` }] };
+    }
+  );
+
+  // ---------- add_task_comment ----------
+
+  server.tool(
+    "add_task_comment",
+    "Add a comment to a task's activity timeline. The comment is appended to the task's recent_comments array; auto-generated activity entries (field changes) are preserved. Example: 'Comment on task <id>: spoke with client, will reschedule'.",
+    {
+      task_id: z.string().describe("Task UUID"),
+      content: z.string().describe("Comment text"),
+    },
+    async ({ task_id, content }) => {
+      const existing = await fetchTask(task_id);
+      if (!existing || !existing.task_id) {
+        return { content: [{ type: "text" as const, text: `Task ${task_id} not found.` }] };
+      }
+      let userId: string | null = null;
+      let userName = "MCP";
+      try {
+        const me = await api.get<{ id: string; name: string }>("/api/auth/me");
+        if (me && me.id) {
+          userId = me.id;
+          userName = me.name || userName;
+        }
+      } catch {
+        // If /api/auth/me isn't available with this auth token, fall through with defaults.
+      }
+      const comments = Array.isArray(existing.recent_comments) ? [...existing.recent_comments as Array<Record<string, unknown>>] : [];
+      const newComment = {
+        id: crypto.randomUUID(),
+        type: "comment",
+        user_id: userId,
+        user_name: userName,
+        content,
+        created_at: new Date().toISOString(),
+      };
+      comments.push(newComment);
+      await api.put(`/api/tasks/${task_id}`, { recent_comments: comments });
+      return { content: [{ type: "text" as const, text: `Comment added to task ${task_id}.\n  ${userName}: ${content}` }] };
+    }
+  );
+
+  // ---------- add_task_attachment ----------
+
+  server.tool(
+    "add_task_attachment",
+    "Attach a file to a task. Provide either a local file_path (uploaded to Votel storage) or a pre-hosted url. Example: 'Attach /tmp/proposal.pdf to task <id>'.",
+    {
+      task_id: z.string().describe("Task UUID"),
+      file_path: z.string().optional().describe("Absolute local file path to upload"),
+      url: z.string().optional().describe("Pre-hosted URL (skips upload)"),
+      name: z.string().optional().describe("Display name (defaults to filename or URL basename)"),
+    },
+    async ({ task_id, file_path, url, name }) => {
+      if (!file_path && !url) {
+        return { content: [{ type: "text" as const, text: "Provide either file_path or url." }] };
+      }
+
+      const existing = await fetchTask(task_id);
+      if (!existing || !existing.task_id) {
+        return { content: [{ type: "text" as const, text: `Task ${task_id} not found.` }] };
+      }
+
+      let attachment: Record<string, unknown>;
+      if (file_path) {
+        const fs = await import("node:fs/promises");
+        const path = await import("node:path");
+        const buf = await fs.readFile(file_path);
+        const filename = name || path.basename(file_path);
+        const form = new FormData();
+        form.set("file", new Blob([new Uint8Array(buf)]), filename);
+        const uploaded = await api.postForm<Record<string, unknown>>("/api/storage/attachment", form);
+        attachment = {
+          name: (uploaded.name as string) || filename,
+          url: uploaded.url,
+          ...uploaded,
+        };
+      } else {
+        const fallbackName = name || (url ? url.split("/").pop() || url : "attachment");
+        attachment = { name: fallbackName, url };
+      }
+
+      const attachments = Array.isArray(existing.attachments) ? [...existing.attachments as Array<Record<string, unknown>>] : [];
+      attachments.push(attachment);
+      await api.put(`/api/tasks/${task_id}`, { attachments });
+      return { content: [{ type: "text" as const, text: `Attached "${attachment.name}" to task ${task_id}.\n  URL: ${attachment.url}` }] };
+    }
+  );
+
+  // ---------- remove_task_attachment ----------
+
+  server.tool(
+    "remove_task_attachment",
+    "Remove an attachment from a task by its display name. Does not delete the underlying file from storage. Example: 'Remove proposal.pdf from task <id>'.",
+    {
+      task_id: z.string().describe("Task UUID"),
+      attachment_name: z.string().describe("Name of the attachment to remove (must match exactly)"),
+    },
+    async ({ task_id, attachment_name }) => {
+      const existing = await fetchTask(task_id);
+      if (!existing || !existing.task_id) {
+        return { content: [{ type: "text" as const, text: `Task ${task_id} not found.` }] };
+      }
+      const before = Array.isArray(existing.attachments) ? existing.attachments as Array<Record<string, unknown>> : [];
+      const after = before.filter((a) => a.name !== attachment_name);
+      if (after.length === before.length) {
+        return { content: [{ type: "text" as const, text: `No attachment named "${attachment_name}" on task ${task_id}.` }] };
+      }
+      await api.put(`/api/tasks/${task_id}`, { attachments: after });
+      return { content: [{ type: "text" as const, text: `Removed "${attachment_name}" from task ${task_id}.` }] };
+    }
+  );
+
+  // ---------- Lookup tools ----------
+
+  server.tool(
+    "list_users",
+    "List users in the workspace — use to discover assigned_to_id values for tasks. Example: 'Who can I assign tasks to?'.",
+    {
+      query: z.string().optional().describe("Substring filter on name or email (client-side)"),
+    },
+    async ({ query }) => {
+      type User = { id: string; name: string; email?: string; role?: string; status?: string };
+      const res = await api.get<{ users: User[]; total_count: number }>("/api/users?for_options=true");
+      let users = res.users || [];
+      if (query) {
+        const q = query.toLowerCase();
+        users = users.filter((u) => (u.name || "").toLowerCase().includes(q) || (u.email || "").toLowerCase().includes(q));
+      }
+      if (users.length === 0) return { content: [{ type: "text" as const, text: "No users found." }] };
+      const lines = users.map((u) => `- ${u.name}${u.email ? ` <${u.email}>` : ""} | role: ${u.role || "?"} | id: ${u.id}`);
+      return { content: [{ type: "text" as const, text: `Found ${users.length} user(s):\n\n${lines.join("\n")}` }] };
+    }
+  );
+
+  server.tool(
+    "list_projects",
+    "List task projects/pipelines for the workspace. Each project has its own status set and task-type set. Example: 'Show me my projects'.",
+    {},
+    async () => {
+      type Project = {
+        id: string; name: string; status_template_id?: string; type_template_id?: string;
+        is_default?: boolean; statuses?: Array<{ id: string; name: string; category: string; color: string }>;
+        types?: Array<{ key: string; label: string }>;
+      };
+      const res = await api.get<{ projects: Project[] }>("/api/projects/");
+      const projects = res.projects || [];
+      if (projects.length === 0) return { content: [{ type: "text" as const, text: "No projects found." }] };
+      const lines = projects.map((p) => {
+        const statusCount = (p.statuses || []).length;
+        const typeCount = (p.types || []).length;
+        return `- ${p.name}${p.is_default ? " (default)" : ""} | statuses: ${statusCount} | types: ${typeCount} | id: ${p.id}`;
+      });
+      return { content: [{ type: "text" as const, text: `Found ${projects.length} project(s):\n\n${lines.join("\n")}\n\nUse list_task_statuses(project_id=...) or list_task_types(project_id=...) for detail.` }] };
+    }
+  );
+
+  server.tool(
+    "list_task_statuses",
+    "List the custom statuses available for a project (or for the project that contains a given task). Statuses are scoped per-project, NOT per task_type. Example: 'What statuses can I set on task <id>?'.",
+    {
+      project_id: z.string().optional().describe("Project UUID. Omit if task_id is provided."),
+      task_id: z.string().optional().describe("Task UUID — resolves to its project."),
+    },
+    async ({ project_id, task_id }) => {
+      let targetProjectId = project_id;
+      if (!targetProjectId && task_id) {
+        const t = await fetchTask(task_id);
+        targetProjectId = t.project_id as string | undefined;
+        if (!targetProjectId) {
+          return { content: [{ type: "text" as const, text: `Task ${task_id} has no project_id.` }] };
+        }
+      }
+      if (!targetProjectId) {
+        return { content: [{ type: "text" as const, text: "Provide either project_id or task_id." }] };
+      }
+      type Project = { id: string; name: string; statuses?: Array<{ id: string; name: string; category: string; color: string; position: number }> };
+      const res = await api.get<{ projects: Project[] }>("/api/projects/");
+      const proj = (res.projects || []).find((p) => p.id === targetProjectId);
+      if (!proj) {
+        return { content: [{ type: "text" as const, text: `Project ${targetProjectId} not found.` }] };
+      }
+      const statuses = (proj.statuses || []).slice().sort((a, b) => a.position - b.position);
+      if (statuses.length === 0) {
+        return { content: [{ type: "text" as const, text: `Project "${proj.name}" has no statuses defined.` }] };
+      }
+      const lines = statuses.map((s) => `- ${s.name} | category: ${s.category} | color: ${s.color} | id: ${s.id}`);
+      return { content: [{ type: "text" as const, text: `Statuses for project "${proj.name}":\n\n${lines.join("\n")}` }] };
+    }
+  );
+
+  server.tool(
+    "list_task_types",
+    "List the task types available for a project (or for the project that contains a given task). Each type has a 'key' (used as task_type on a task) and a display 'label'. Example: 'What task types can I use in project <id>?'.",
+    {
+      project_id: z.string().optional().describe("Project UUID. Omit if task_id is provided."),
+      task_id: z.string().optional().describe("Task UUID — resolves to its project."),
+    },
+    async ({ project_id, task_id }) => {
+      let targetProjectId = project_id;
+      if (!targetProjectId && task_id) {
+        const t = await fetchTask(task_id);
+        targetProjectId = t.project_id as string | undefined;
+        if (!targetProjectId) {
+          return { content: [{ type: "text" as const, text: `Task ${task_id} has no project_id.` }] };
+        }
+      }
+      if (!targetProjectId) {
+        return { content: [{ type: "text" as const, text: "Provide either project_id or task_id." }] };
+      }
+      type Project = { id: string; name: string; types?: Array<{ key: string; label: string; color: string; icon?: string; position: number }> };
+      const res = await api.get<{ projects: Project[] }>("/api/projects/");
+      const proj = (res.projects || []).find((p) => p.id === targetProjectId);
+      if (!proj) {
+        return { content: [{ type: "text" as const, text: `Project ${targetProjectId} not found.` }] };
+      }
+      const types = (proj.types || []).slice().sort((a, b) => a.position - b.position);
+      if (types.length === 0) {
+        return { content: [{ type: "text" as const, text: `Project "${proj.name}" has no task types defined.` }] };
+      }
+      const lines = types.map((t) => `- ${t.label} | key: ${t.key} | color: ${t.color}${t.icon ? ` | icon: ${t.icon}` : ""}`);
+      return { content: [{ type: "text" as const, text: `Task types for project "${proj.name}":\n\n${lines.join("\n")}\n\nUse the 'key' value as task_type when creating or updating tasks.` }] };
+    }
+  );
+
+  server.tool(
+    "list_task_tags",
+    "Autocomplete task tag suggestions. Example: 'What tags exist for tasks?' or 'Tags starting with foll'.",
+    {
+      query: z.string().optional().describe("Substring filter"),
+      limit: z.number().optional().default(50).describe("Max results"),
+    },
+    async ({ query, limit }) => {
+      const params = new URLSearchParams();
+      if (query) params.set("q", query);
+      params.set("limit", String(limit ?? 50));
+      const res = await api.get<{ options: Array<{ value: string; label: string }> }>(`/api/tasks/tags/autocomplete?${params.toString()}`);
+      const options = res.options || [];
+      if (options.length === 0) return { content: [{ type: "text" as const, text: "No tags found." }] };
+      return { content: [{ type: "text" as const, text: `Found ${options.length} tag(s):\n${options.map((o) => `- ${o.value}`).join("\n")}` }] };
+    }
+  );
+
+  server.tool(
+    "get_task_stats",
+    "Summary task statistics for the workspace — counts by status, priority, etc. Optional filter by assignee. Example: 'Give me task stats' or 'Show task stats for Alice'.",
+    {
+      assigned_to_id: z.string().optional().describe("Filter to a single user's tasks (use list_users)"),
+    },
+    async ({ assigned_to_id }) => {
+      const params = new URLSearchParams();
+      if (assigned_to_id) params.set("assigned_to_id", assigned_to_id);
+      const qs = params.toString();
+      const res = await api.get<{ success: boolean; data: Record<string, unknown> }>(`/api/tasks/stats/summary${qs ? `?${qs}` : ""}`);
+      const data = res.data || {};
+      const json = JSON.stringify(data, null, 2);
+      return { content: [{ type: "text" as const, text: `Task stats:\n\n${json}` }] };
     }
   );
 
