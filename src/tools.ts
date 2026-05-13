@@ -699,29 +699,21 @@ export function registerTools(server: McpServer, api: ApiClient): void {
       if (!existing || !existing.task_id) {
         return { content: [{ type: "text" as const, text: `Task ${task_id} not found.` }] };
       }
-      let userId: string | null = null;
-      let userName = "MCP";
-      try {
-        const me = await api.get<{ id: string; name: string }>("/api/auth/me");
-        if (me && me.id) {
-          userId = me.id;
-          userName = me.name || userName;
-        }
-      } catch {
-        // If /api/auth/me isn't available with this auth token, fall through with defaults.
-      }
+      // Identity is resolved server-side from the API key's authenticated context.
+      // The client must NEVER send user_id or user_name — they will be stamped by app-aie.
       const comments = Array.isArray(existing.recent_comments) ? [...existing.recent_comments as Array<Record<string, unknown>>] : [];
       const newComment = {
         id: crypto.randomUUID(),
         type: "comment",
-        user_id: userId,
-        user_name: userName,
         content,
         created_at: new Date().toISOString(),
       };
       comments.push(newComment);
-      await api.put(`/api/tasks/${task_id}`, { recent_comments: comments });
-      return { content: [{ type: "text" as const, text: `Comment added to task ${task_id}.\n  ${userName}: ${content}` }] };
+      const res = await api.put<{ success: boolean; data: TaskRow }>(`/api/tasks/${task_id}`, { recent_comments: comments });
+      const persisted = res.data?.recent_comments as Array<Record<string, unknown>> | undefined;
+      const added = Array.isArray(persisted) ? persisted.find((c) => c.id === newComment.id) : null;
+      const authorName = (added?.user_name as string) || "(server-resolved)";
+      return { content: [{ type: "text" as const, text: `Comment added to task ${task_id}.\n  ${authorName}: ${content}` }] };
     }
   );
 
