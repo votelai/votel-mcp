@@ -6,12 +6,11 @@
  * An MCP server that enables AI assistants to manage and publish websites
  * via the Votel platform.
  *
- * Environment variables (either name works — the generic name takes precedence
- * over the legacy Votel-prefixed name when both are set):
+ * Environment variables:
  *   API_KEY        - API key (sk_...). Create one at Settings > API Keys.
- *   VOTEL_API_KEY  - Legacy alias of API_KEY (back-compat).
- *   API_URL        - Backend URL (optional, defaults to https://app.votel.ai).
- *   VOTEL_API_URL  - Legacy alias of API_URL (back-compat).
+ *                    Also accepted as VOTEL_API_KEY.
+ *   API_URL        - Backend URL. Defaults to https://app.votel.ai.
+ *                    Also accepted as VOTEL_API_URL.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
